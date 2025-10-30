@@ -8,6 +8,15 @@ export interface ParsedData {
   dateIndices: number[];
 }
 
+export interface ParsedDataMulti {
+  headers: string[];
+  data: string[][];
+  entityIdIndex: number;
+  currencyIndex: number;
+  categoryIndex: number;
+  dateIndices: number[];
+}
+
 export interface TransformOptions {
   currency: string;
   parentId: string;
@@ -78,6 +87,39 @@ export function parseFile(file: File): Promise<ParsedData> {
   });
 }
 
+export function parseFileMulti(file: File): Promise<ParsedDataMulti> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = e.target?.result;
+        if (!data) {
+          reject(new Error('Failed to read file'));
+          return;
+        }
+        let parsed: ParsedDataMulti;
+        if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+          parsed = parseExcelAsMulti(data as ArrayBuffer);
+        } else if (file.name.endsWith('.csv')) {
+          parsed = parseCSVMulti(data as string);
+        } else {
+          reject(new Error('Unsupported file format. Please use CSV or XLSX files.'));
+          return;
+        }
+        resolve(parsed);
+      } catch (err) {
+        reject(err);
+      }
+    };
+    reader.onerror = () => reject(new Error('Failed to read file'));
+    if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.readAsText(file, 'utf-8');
+    }
+  });
+}
+
 function parseExcel(data: ArrayBuffer): ParsedData {
   const workbook = XLSX.read(data, { type: 'array' });
   const sheetName = workbook.SheetNames[0];
@@ -93,6 +135,18 @@ function parseExcel(data: ArrayBuffer): ParsedData {
   return parseArrayData(jsonData);
 }
 
+function parseExcelAsMulti(data: ArrayBuffer): ParsedDataMulti {
+  const workbook = XLSX.read(data, { type: 'array' });
+  const sheetName = workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[sheetName];
+  const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+    header: 1,
+    defval: '',
+    raw: true
+  }) as any[][];
+  return parseArrayDataMulti(jsonData);
+}
+
 function parseCSV(data: string): ParsedData {
   // Check if it's tab-separated by looking for tabs
   const isTabSeparated = data.includes('\t') && !data.includes(',');
@@ -104,6 +158,16 @@ function parseCSV(data: string): ParsedData {
   });
   
   return parseArrayData(result.data as string[][]);
+}
+
+function parseCSVMulti(data: string): ParsedDataMulti {
+  const isTabSeparated = data.includes('\t') && !data.includes(',');
+  const result = Papa.parse(data, {
+    header: false,
+    skipEmptyLines: true,
+    delimiter: isTabSeparated ? '\t' : ','
+  });
+  return parseArrayDataMulti(result.data as string[][]);
 }
 
 function parseArrayData(data: any[][]): ParsedData {
@@ -145,6 +209,37 @@ function parseArrayData(data: any[][]): ParsedData {
   return {
     headers,
     data: nonEmptyRows.map(row => row.map(cell => cell?.toString() || '')),
+    categoryIndex,
+    dateIndices
+  };
+}
+
+function parseArrayDataMulti(data: any[][]): ParsedDataMulti {
+  if (data.length === 0) throw new Error('File is empty');
+  const headers = data[0].map(h => {
+    if (h && typeof h === 'number') {
+      const iso = excelSerialToIso(h);
+      const yr = parseInt(iso.slice(0, 4), 10);
+      if (yr >= 1900 && yr <= 2100) return iso;
+    }
+    return h?.toString() || '';
+  });
+  const lower = headers.map(h => h.toLowerCase().trim());
+  const entityIdIndex = lower.findIndex(h => h === 'entity id' || h === 'entity_id' || h === 'parent.id');
+  const currencyIndex = lower.findIndex(h => h === 'currency' || h === 'amount.currency');
+  const categoryIndex = lower.findIndex(h => h === 'category');
+  if (entityIdIndex === -1) throw new Error('No "Entity ID" column found.');
+  if (currencyIndex === -1) throw new Error('No "Currency" column found.');
+  if (categoryIndex === -1) throw new Error('No "Category" column found.');
+  const dateIndices = findDateIndices(headers, categoryIndex);
+  if (dateIndices.length === 0) throw new Error('No valid date columns found to the right of Category column.');
+  const nonEmptyRows = data.slice(1).filter(row => row.some(cell => cell && cell.toString().trim() !== ''));
+  if (nonEmptyRows.length === 0) throw new Error('No data rows found.');
+  return {
+    headers,
+    data: nonEmptyRows.map(row => row.map(cell => cell?.toString() || '')),
+    entityIdIndex,
+    currencyIndex,
     categoryIndex,
     dateIndices
   };
@@ -308,6 +403,36 @@ export function transformData(parsedData: ParsedData, options: TransformOptions)
     }
   }
   
+  return result;
+}
+
+export function transformDataMulti(parsed: ParsedDataMulti): TransformedRow[] {
+  const result: TransformedRow[] = [];
+  for (const row of parsed.data) {
+    const category = row[parsed.categoryIndex]?.trim();
+    if (!category) continue;
+    const description = getCategoryLeaf(category);
+    const currency = row[parsed.currencyIndex]?.toUpperCase()?.trim();
+    const parentId = row[parsed.entityIdIndex]?.trim();
+    if (!currency || !parentId) continue;
+    for (const dateIndex of parsed.dateIndices) {
+      const dateHeader = parsed.headers[dateIndex];
+      const amountStr = row[dateIndex];
+      const parsedDate = parseDate(dateHeader);
+      const parsedAmount = parseAmount(amountStr);
+      if (parsedDate && parsedAmount !== null) {
+        result.push({
+          'amount.currency': currency,
+          'amount.stringValue': parsedAmount.toFixed(2),
+          'date': parsedDate,
+          'parent.id': parentId,
+          'parent.type': 'ENTITY',
+          'description': description,
+          'metadata.atlar.category': description
+        });
+      }
+    }
+  }
   return result;
 }
 
