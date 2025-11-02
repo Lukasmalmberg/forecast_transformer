@@ -6,6 +6,8 @@ export interface ParsedData {
   data: string[][];
   categoryIndex: number;
   dateIndices: number[];
+  // Maps column index to array of expanded dates (for week-range headers)
+  expandedDates: Map<number, string[]>;
 }
 
 export interface ParsedDataMulti {
@@ -20,6 +22,7 @@ export interface ParsedDataMulti {
 export interface TransformOptions {
   currency: string;
   parentId: string;
+  periodicity?: string; // Optional periodicity field
 }
 
 // Format YYYY-MM-DD without timezone side effects
@@ -150,12 +153,17 @@ function parseExcelAsMulti(data: ArrayBuffer): ParsedDataMulti {
 function parseCSV(data: string): ParsedData {
   // Check if it's tab-separated by looking for tabs
   const isTabSeparated = data.includes('\t') && !data.includes(',');
+  console.log('[parseCSV] Tab-separated:', isTabSeparated);
+  console.log('[parseCSV] First 200 chars:', data.substring(0, 200));
   
   const result = Papa.parse(data, {
     header: false,
     skipEmptyLines: true,
     delimiter: isTabSeparated ? '\t' : ','
   });
+  
+  console.log('[parseCSV] Parsed rows:', result.data.length);
+  console.log('[parseCSV] First row:', result.data[0]);
   
   return parseArrayData(result.data as string[][]);
 }
@@ -176,6 +184,7 @@ function parseArrayData(data: any[][]): ParsedData {
   }
 
   // Convert headers, handling Excel date serial numbers
+  console.log('[parseArrayData] Raw first row:', data[0]);
   const headers = data[0].map(h => {
     if (h && typeof h === 'number') {
       const iso = excelSerialToIso(h);
@@ -184,17 +193,24 @@ function parseArrayData(data: any[][]): ParsedData {
     }
     return h?.toString() || '';
   });
+  console.log('[parseArrayData] Converted headers:', headers);
   
   const categoryIndex = findCategoryIndex(headers);
+  console.log('[parseArrayData] Category index:', categoryIndex);
   
   if (categoryIndex === -1) {
     throw new Error('No "Category" column found. Please ensure your file has a "Category" header.');
   }
 
-  const dateIndices = findDateIndices(headers, categoryIndex);
+  const { indices: dateIndices, expandedDates } = findDateIndices(headers, categoryIndex);
   
   if (dateIndices.length === 0) {
-    throw new Error('No valid date columns found to the right of Category column.');
+    // Show what headers we actually found for debugging
+    const headersAfterCategory = headers.slice(categoryIndex + 1, categoryIndex + 10); // Show first 9
+    const allHeadersAfterCategory = headersAfterCategory.map((h, idx) => `[${categoryIndex + 1 + idx}]="${h}"`).join(', ');
+    console.error('[ERROR] No date columns found. All headers:', headers);
+    console.error('[ERROR] Headers after Category:', allHeadersAfterCategory);
+    throw new Error(`No valid date columns found to the right of Category column. Headers found: ${allHeadersAfterCategory || 'NONE'}`);
   }
 
   // Filter out empty rows
@@ -210,7 +226,8 @@ function parseArrayData(data: any[][]): ParsedData {
     headers,
     data: nonEmptyRows.map(row => row.map(cell => cell?.toString() || '')),
     categoryIndex,
-    dateIndices
+    dateIndices,
+    expandedDates
   };
 }
 
@@ -231,7 +248,7 @@ function parseArrayDataMulti(data: any[][]): ParsedDataMulti {
   if (entityIdIndex === -1) throw new Error('No "Entity ID" column found.');
   if (currencyIndex === -1) throw new Error('No "Currency" column found.');
   if (categoryIndex === -1) throw new Error('No "Category" column found.');
-  const dateIndices = findDateIndices(headers, categoryIndex);
+  const { indices: dateIndices } = findDateIndices(headers, categoryIndex);
   if (dateIndices.length === 0) throw new Error('No valid date columns found to the right of Category column.');
   const nonEmptyRows = data.slice(1).filter(row => row.some(cell => cell && cell.toString().trim() !== ''));
   if (nonEmptyRows.length === 0) throw new Error('No data rows found.');
@@ -251,34 +268,131 @@ function findCategoryIndex(headers: string[]): number {
   );
 }
 
-function findDateIndices(headers: string[], categoryIndex: number): number[] {
+function findDateIndices(headers: string[], categoryIndex: number): { indices: number[], expandedDates: Map<number, string[]> } {
   const dateIndices: number[] = [];
+  const expandedDates = new Map<number, string[]>();
   
+  // Check headers starting from after Category column
   for (let i = categoryIndex + 1; i < headers.length; i++) {
     const header = headers[i];
     
-    if (header && typeof header === 'string') {
-      const trimmedHeader = header.trim();
+    // Skip empty headers but continue checking
+    if (!header) {
+      continue;
+    }
+    
+    // Convert to string if it's not already
+    const headerStr = typeof header === 'string' ? header : String(header);
+    
+    // Normalize header: trim, collapse whitespace, normalize unicode dashes to '-'
+    const normalizedHeader = headerStr.trim().replace(/\s+/g, ' ').replace(/[–—]/g, '-');
+    
+    // Skip if empty after normalization
+    if (!normalizedHeader) {
+      continue;
+    }
+    
+    // Debug: log what we're checking
+    console.log(`[findDateIndices] Checking header at index ${i}: "${normalizedHeader}"`);
+    
+    const isValid = isValidDateHeader(normalizedHeader);
+    console.log(`[findDateIndices] isValidDateHeader("${normalizedHeader}") = ${isValid}`);
+    
+    if (isValid) {
+      dateIndices.push(i);
       
-      if (isValidDateHeader(trimmedHeader)) {
-        dateIndices.push(i);
-      } else {
-        // Stop at first non-date header
-        break;
+      // Check if it's a week range and expand it
+      const weekRange = parseWeekRange(normalizedHeader);
+      if (weekRange) {
+        console.log(`[findDateIndices] Week range detected, expanded to ${weekRange.length} dates`);
+        expandedDates.set(i, weekRange);
       }
     } else {
-      // Stop at first non-string header
+      // Stop at first non-empty, non-date header
+      // (allow empty cells between date columns)
+      console.log(`[findDateIndices] Stopping at non-date header: "${normalizedHeader}"`);
       break;
     }
   }
   
-  return dateIndices;
+  console.log(`[findDateIndices] Returning ${dateIndices.length} date indices:`, dateIndices);
+  return { indices: dateIndices, expandedDates };
+}
+
+// Parse week range (e.g., "Oct 27 - Nov 2" or "Nov 3-9") and expand to individual dates
+function parseWeekRange(rangeStr: string): string[] | null {
+  // Normalize: trim, collapse whitespace, and normalize dashes to '-'
+  const trimmed = rangeStr
+    .trim()
+    .replace(/\s+/g, ' ')
+    .replace(/[–—]/g, '-');
+  
+  // Pattern: "Mon DD - Mon DD" (cross-month or same month with explicit month name)
+  const rangePattern1 = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|jan|feb|mar|apr|may|jun|jul|aug|sep|okt|nov|dec)\s+(\d{1,2})\s*[-–—]\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|jan|feb|mar|apr|may|jun|jul|aug|sep|okt|nov|dec)\s+(\d{1,2})$/i;
+  // Pattern: "Mon DD-DD" (same month)
+  const rangePattern2 = /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|jan|feb|mar|apr|may|jun|jul|aug|sep|okt|nov|dec)\s+(\d{1,2})\s*[-–—]\s*(\d{1,2})$/i;
+  
+  const monthMap: { [key: string]: number } = {
+    'jan': 0, 'feb': 1, 'mar': 2, 'apr': 3, 'may': 4, 'jun': 5,
+    'jul': 6, 'aug': 7, 'sep': 8, 'oct': 9, 'okt': 9, 'nov': 10, 'dec': 11
+  };
+  
+  let startMonth: number, startDay: number, endMonth: number, endDay: number;
+  const year = 2025;
+  
+  const match1 = trimmed.match(rangePattern1);
+  const match2 = trimmed.match(rangePattern2);
+  
+  if (match1) {
+    // Full range: "Oct 27 - Nov 2"
+    console.log(`[parseWeekRange] Matched pattern1: ${match1[0]}`);
+    startMonth = monthMap[match1[1].toLowerCase()];
+    startDay = parseInt(match1[2], 10);
+    endMonth = monthMap[match1[3].toLowerCase()];
+    endDay = parseInt(match1[4], 10);
+    console.log(`[parseWeekRange] Extracted: month1=${startMonth}, day1=${startDay}, month2=${endMonth}, day2=${endDay}`);
+  } else if (match2) {
+    // Same month: "Nov 3-9"
+    console.log(`[parseWeekRange] Matched pattern2: ${match2[0]}`);
+    startMonth = monthMap[match2[1].toLowerCase()];
+    startDay = parseInt(match2[2], 10);
+    endMonth = startMonth;
+    endDay = parseInt(match2[3], 10);
+    console.log(`[parseWeekRange] Extracted: month=${startMonth}, day1=${startDay}, day2=${endDay}`);
+  } else {
+    console.log(`[parseWeekRange] No pattern match - returning null`);
+    return null;
+  }
+  
+  if (startMonth === undefined || endMonth === undefined) {
+    console.log(`[parseWeekRange] Invalid month (start=${startMonth}, end=${endMonth}) - returning null`);
+    return null;
+  }
+  
+  // Generate all dates in range
+  const dates: string[] = [];
+  const start = new Date(year, startMonth, startDay);
+  const end = new Date(year, endMonth, endDay);
+  
+  console.log(`[parseWeekRange] Date range: ${start.toISOString()} to ${end.toISOString()}`);
+  
+  for (let d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    dates.push(formatIsoDate(d.getFullYear(), d.getMonth(), d.getDate()));
+  }
+  
+  console.log(`[parseWeekRange] Generated ${dates.length} dates`);
+  return dates.length > 0 ? dates : null;
 }
 
 function isValidDateHeader(header: string): boolean {
   if (!header) return false;
   
-  const trimmed = header.trim();
+  // Normalize: trim and replace multiple whitespace with single space
+  const normalized = header.trim().replace(/\s+/g, ' ').replace(/[–—]/g, '-');
+  
+  // Try week-range parse directly
+  const weekRange = parseWeekRange(normalized);
+  if (weekRange) return true;
   
   // Check various date formats
   const dateFormats = [
@@ -289,7 +403,7 @@ function isValidDateHeader(header: string): boolean {
     /^(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|jan|feb|mar|apr|may|jun|jul|aug|sep|okt|nov|dec)\s+\d{1,2}$/i, // Mon XX format (e.g., "Oct 29", "okt 29")
   ];
   
-  return dateFormats.some(format => format.test(trimmed));
+  return dateFormats.some(format => format.test(normalized));
 }
 
 export function parseDate(dateStr: string): string | null {
@@ -383,13 +497,30 @@ export function transformData(parsedData: ParsedData, options: TransformOptions)
     const description = getCategoryLeaf(category);
     
     for (const dateIndex of parsedData.dateIndices) {
-      const dateHeader = parsedData.headers[dateIndex];
       const amountStr = row[dateIndex];
-      
-      const parsedDate = parseDate(dateHeader);
       const parsedAmount = parseAmount(amountStr);
-      
-      if (parsedDate && parsedAmount !== null) {
+      if (parsedAmount === null) continue;
+
+      // If this column came from a week range, only output one row using the first day
+      const expandedDatesForColumn = parsedData.expandedDates.get(dateIndex);
+      if (expandedDatesForColumn && expandedDatesForColumn.length > 0) {
+        const lastDate = expandedDatesForColumn[expandedDatesForColumn.length - 1];
+        result.push({
+          'amount.currency': options.currency,
+          'amount.stringValue': parsedAmount.toFixed(2),
+          'date': lastDate,
+          'parent.id': options.parentId,
+          'parent.type': 'ENTITY',
+          'description': description,
+          'metadata.atlar.category': description
+        });
+        continue;
+      }
+
+      // Single-date column
+      const dateHeader = parsedData.headers[dateIndex];
+      const parsedDate = parseDate(dateHeader);
+      if (parsedDate) {
         result.push({
           'amount.currency': options.currency,
           'amount.stringValue': parsedAmount.toFixed(2),

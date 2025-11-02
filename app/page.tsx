@@ -18,6 +18,7 @@ export default function Home() {
   // Form options
   const [currency, setCurrency] = useState('SEK');
   const [parentId, setParentId] = useState('ENTITY_ID');
+  const [periodicity, setPeriodicity] = useState('');
   const [useCategoryLeaf, setUseCategoryLeaf] = useState(true);
 
   // Multi-entity parsed data
@@ -84,7 +85,8 @@ export default function Home() {
     try {
       const options: TransformOptions = {
         currency: currency.toUpperCase(),
-        parentId
+        parentId,
+        periodicity: periodicity.trim() || undefined
       };
       
       const transformed = transformData(parsedData, options);
@@ -141,6 +143,7 @@ export default function Home() {
     setParsedData(null);
     setTransformedData([]);
     setError('');
+    setPeriodicity('');
   }, []);
 
   const handleCurrencyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -154,7 +157,7 @@ export default function Home() {
         <div className="mb-4 flex gap-2 justify-center">
           <button
             className={`px-4 py-2 rounded-md border ${activeTab==='single' ? 'bg-primary-600 text-white border-primary-600' : 'bg-white text-gray-700 border-gray-300'}`}
-            onClick={() => { setActiveTab('single'); setCurrentStep(1); setSelectedFile(null); setParsedData(null); setParsedDataMulti(null); setTransformedData([]); setError(''); }}
+            onClick={() => { setActiveTab('single'); setCurrentStep(1); setSelectedFile(null); setParsedData(null); setParsedDataMulti(null); setTransformedData([]); setError(''); setPeriodicity(''); }}
           >
             Single entity
           </button>
@@ -293,6 +296,20 @@ export default function Home() {
                     <label className="block text-sm font-medium text-gray-700 mb-2">Parent ID</label>
                     <input type="text" value={parentId} onChange={(e) => setParentId(e.target.value)} className="input-field" placeholder="ENTITY_ID" />
                     <p className="text-sm text-gray-600 mt-2">Find your entity ID at{' '}<a href="https://app.atlar.com/entities" target="_blank" rel="noopener noreferrer" className="text-primary-600 hover:text-primary-700 underline flex items-center space-x-1 text-base font-semibold"><span>app.atlar.com/entities</span><ExternalLink className="h-4 w-4" /></a></p>
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">Periodicity</label>
+                    <select
+                      value={periodicity}
+                      onChange={(e) => setPeriodicity(e.target.value)}
+                      className="input-field"
+                    >
+                      <option value="">Select periodicity</option>
+                      <option value="Daily">Daily</option>
+                      <option value="Weekly">Weekly</option>
+                      <option value="Monthly">Monthly</option>
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">Applies to single-entity uploads only</p>
                   </div>
                 </div>
                 <div className="flex space-x-4 mt-8">
