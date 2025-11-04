@@ -35,3 +35,4 @@ echo "   npm run build  # Build for production"
 echo "   npm start      # Start production server"
 echo ""
 echo "The app will be available at http://localhost:3000"
+

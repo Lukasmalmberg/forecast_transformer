@@ -416,22 +416,22 @@ export function parseDate(dateStr: string): string | null {
     return trimmed;
   }
   
-  // DD/MM/YYYY or MM/DD/YYYY format
-  if (/^\d{2}\/\d{2}\/\d{4}$/.test(trimmed)) {
+  // DD/MM/YYYY or MM/DD/YYYY format (allow single-digit day/month)
+  if (/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(trimmed)) {
     const parts = trimmed.split('/');
-    const day = parts[0];
-    const month = parts[1];
+    const a = parts[0];
+    const b = parts[1];
     const year = parts[2];
     
-    // Try DD/MM/YYYY first, then MM/DD/YYYY
-    const date1 = new Date(`${year}-${month.padStart(2, '0')}-${day.padStart(2, '0')}`);
-    const date2 = new Date(`${year}-${day.padStart(2, '0')}-${month.padStart(2, '0')}`);
+    // Prefer MM/DD first (common in exports), then fallback to DD/MM
+    const mmdd = new Date(`${year}-${a.padStart(2, '0')}-${b.padStart(2, '0')}`);
+    const ddmm = new Date(`${year}-${b.padStart(2, '0')}-${a.padStart(2, '0')}`);
     
-    // Check which one is valid
-    if (!isNaN(date1.getTime()) && date1.getFullYear() == parseInt(year)) {
-      return date1.toISOString().split('T')[0];
-    } else if (!isNaN(date2.getTime()) && date2.getFullYear() == parseInt(year)) {
-      return date2.toISOString().split('T')[0];
+    if (!isNaN(mmdd.getTime()) && mmdd.getFullYear() == parseInt(year)) {
+      return mmdd.toISOString().split('T')[0];
+    }
+    if (!isNaN(ddmm.getTime()) && ddmm.getFullYear() == parseInt(year)) {
+      return ddmm.toISOString().split('T')[0];
     }
   }
   
@@ -575,10 +575,11 @@ export function generateCSV(data: TransformedRow[]): string {
   const csvContent = [
     headers.join(','),
     ...data.map(row => {
+      const normalizedDate = parseDate(String(row['date'])) || String(row['date']);
       const values = [
         row['amount.currency'],
         row['amount.stringValue'],
-        row['date'],
+        normalizedDate,
         row['parent.id'],
         row['parent.type'],
         row['description'],

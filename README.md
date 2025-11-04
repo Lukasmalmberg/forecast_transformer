@@ -112,3 +112,4 @@ The application provides comprehensive error handling for:
 ## License
 
 This project is proprietary software for Storytel.
+
